@@ -1,3 +1,4 @@
+#include <asm-generic/errno-base.h>
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
@@ -40,6 +41,13 @@ typedef struct graph{
     int node_num;
 } graph_t;
 
+typedef struct ant
+{
+    int ID;
+    int path[MAX_PATH_LENGTH];
+    int path_length;
+}ant_t;
+
 int set_handler(void (*f)(int), int sig)
 {
     struct sigaction act = {0};
@@ -68,7 +76,8 @@ void usage(int argc, char* argv[])
     exit(EXIT_FAILURE);
 }
 
-void child_work(node_t node, int id){
+void child_work(node_t node, int id, int fd_w[MAX_GRAPH_NODES], int destination){
+    srand(getpid());
     set_handler(sig_handler, SIGINT);
     printf("ID %d: ", id);
     for(int i = 0; i < node.neighbor_num; i++){
@@ -77,13 +86,30 @@ void child_work(node_t node, int id){
     printf("\n");
     read_fd = node.pipe[0];
     while(!stop_work){
-        char p;
-        if(read(node.pipe[0], &p, 1) < 0){
+        ant_t ant;
+        if(read(node.pipe[0], &ant, sizeof(ant)) < 0){
             if(errno == EINTR || errno == EBADF){
                 break;
             }
             ERR("read");
         }
+        ant.path[ant.path_length++] = id;
+        if(node.neighbor_num == 0 || ant.path_length >= MAX_PATH_LENGTH){
+            printf("Ant {%d}: got lost\n", ant.ID);
+        }
+        else if(id == destination){
+            printf("Ant {%d}: found food\n", ant.ID);
+        }
+        else{
+            int next_node = rand() % node.neighbor_num;
+            if(write(fd_w[node.neighbors[next_node]], &ant, sizeof(ant)) == -1){
+                if(errno == EINTR){
+                    break;
+                }
+                ERR("write");
+            }
+        }
+        msleep(100);
     }
 }
 
@@ -123,8 +149,11 @@ int main(int argc, char* argv[])
 
 
     char* filename = argv[1];
+    int start = atoi(argv[2]);
+    int destination = atoi(argv[3]);
 
     set_handler(SIG_IGN, SIGINT);
+    set_handler(SIG_IGN, SIGPIPE);
 
     graph_t graph = read_colony(filename);
 
@@ -140,28 +169,55 @@ int main(int argc, char* argv[])
             ERR("fork()");
         }
         else if(pid == 0){
+            int fd_w[MAX_GRAPH_NODES];
             for(int j = 0; j < graph.node_num; j++){
                 if(i == j){
                     close(graph.nodes[i].pipe[1]);
                 }
                 else{
-                    close(graph.nodes[i].pipe[0]);
+                    close(graph.nodes[j].pipe[0]);
+                    fd_w[j] = graph.nodes[j].pipe[1];
                 }
             }
-            child_work(graph.nodes[i], i);
+            child_work(graph.nodes[i], i, fd_w, destination);
             for(int j = 0; j < graph.node_num; j++){
                 if(i == j){
                     close(graph.nodes[i].pipe[0]);
                 }
                 else{
-                    close(graph.nodes[i].pipe[1]);
+                    close(fd_w[j]);
                 }
             }
             exit(EXIT_SUCCESS);
         }
     }
 
+    for(int i = 0; i < graph.node_num; i++){
+        if(i == start){
+            close(graph.nodes[i].pipe[0]);
+        }
+        else{
+            close(graph.nodes[i].pipe[0]);
+            close(graph.nodes[i].pipe[1]);
+        }
+    }
+    
+    int ant_index = 0;
+    while(1){
+        msleep(1000);
+        ant_t ant = {};
+        ant.ID = ant_index++;
+        if(write(graph.nodes[start].pipe[1], &ant, sizeof(ant)) == -1){
+            if(errno == EPIPE){
+                break;
+            }
+            ERR("write");
+        }
+    }
+
     while(wait(NULL) > 0);
+
+    close(graph.nodes[start].pipe[1]);
 
     exit(EXIT_SUCCESS);
 }
