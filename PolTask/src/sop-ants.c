@@ -19,6 +19,16 @@
 
 #define FIFO_NAME "/tmp/colony_fifo"
 
+volatile sig_atomic_t stop_work;
+static int read_fd;
+
+void sig_handler(int signal){
+    if(signal == SIGINT){
+        stop_work = 1;
+        close(read_fd);
+    }
+}
+
 typedef struct node{
     int neighbors[MAX_GRAPH_NODES];
     int neighbor_num;
@@ -59,15 +69,22 @@ void usage(int argc, char* argv[])
 }
 
 void child_work(node_t node, int id){
+    set_handler(sig_handler, SIGINT);
     printf("ID %d: ", id);
-    if (node.neighbor_num <= 0) {
-        printf("None\n");
-        return;
-    }
-    for(int i = 0; i < node.neighbor_num - 1; i++){
+    for(int i = 0; i < node.neighbor_num; i++){
         printf("%d ", node.neighbors[i]);
     }
-    printf("%d\n", node.neighbors[node.neighbor_num - 1]);
+    printf("\n");
+    read_fd = node.pipe[0];
+    while(!stop_work){
+        char p;
+        if(read(node.pipe[0], &p, 1) < 0){
+            if(errno == EINTR || errno == EBADF){
+                break;
+            }
+            ERR("read");
+        }
+    }
 }
 
 graph_t read_colony(char* filename){
@@ -107,7 +124,15 @@ int main(int argc, char* argv[])
 
     char* filename = argv[1];
 
+    set_handler(SIG_IGN, SIGINT);
+
     graph_t graph = read_colony(filename);
+
+    for(int i = 0; i < graph.node_num; i++){
+        if(pipe(graph.nodes[i].pipe) == -1){
+            ERR("pipe");
+        }
+    }
 
     for(int i = 0; i < graph.node_num; i++){
         pid_t pid = fork();
@@ -115,7 +140,23 @@ int main(int argc, char* argv[])
             ERR("fork()");
         }
         else if(pid == 0){
+            for(int j = 0; j < graph.node_num; j++){
+                if(i == j){
+                    close(graph.nodes[i].pipe[1]);
+                }
+                else{
+                    close(graph.nodes[i].pipe[0]);
+                }
+            }
             child_work(graph.nodes[i], i);
+            for(int j = 0; j < graph.node_num; j++){
+                if(i == j){
+                    close(graph.nodes[i].pipe[0]);
+                }
+                else{
+                    close(graph.nodes[i].pipe[1]);
+                }
+            }
             exit(EXIT_SUCCESS);
         }
     }
