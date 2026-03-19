@@ -85,9 +85,10 @@ void child_work(node_t node, int id, int fd_w[MAX_GRAPH_NODES], int destination)
     }
     printf("\n");
     read_fd = node.pipe[0];
+    int FIFO = open(FIFO_NAME, O_WRONLY);
     while(!stop_work){
         ant_t ant;
-        if(read(node.pipe[0], &ant, sizeof(ant)) < 0){
+        if(read(read_fd, &ant, sizeof(ant)) < 0){
             if(errno == EINTR || errno == EBADF){
                 break;
             }
@@ -99,6 +100,9 @@ void child_work(node_t node, int id, int fd_w[MAX_GRAPH_NODES], int destination)
         }
         else if(id == destination){
             printf("Ant {%d}: found food\n", ant.ID);
+            if(write(FIFO, &ant, sizeof(ant)) == -1){
+                ERR("write");
+            }
         }
         else{
             int next_node = rand() % node.neighbor_num;
@@ -106,11 +110,24 @@ void child_work(node_t node, int id, int fd_w[MAX_GRAPH_NODES], int destination)
                 if(errno == EINTR){
                     break;
                 }
+                if(errno == EPIPE){
+                    printf("Ant {%d}: got lost\n", ant.ID);
+                    if(rand()%50 == 0){
+                    printf("Node {%d}: collapsed\n", id);
+                    break;
+                }
+                    continue;
+                }
                 ERR("write");
+            }
+            if(rand()%50 == 0){
+                printf("Node {%d}: collapsed\n", id);
+                break;
             }
         }
         msleep(100);
     }
+    close(FIFO);
 }
 
 graph_t read_colony(char* filename){
@@ -154,6 +171,9 @@ int main(int argc, char* argv[])
 
     set_handler(SIG_IGN, SIGINT);
     set_handler(SIG_IGN, SIGPIPE);
+
+    unlink(FIFO_NAME);
+    mkfifo(FIFO_NAME, 0666);
 
     graph_t graph = read_colony(filename);
 
@@ -201,23 +221,44 @@ int main(int argc, char* argv[])
             close(graph.nodes[i].pipe[1]);
         }
     }
+
+    int fd = open(FIFO_NAME, O_RDONLY | O_NONBLOCK);
+    if(fd == -1){
+        ERR("open");
+    }
     
     int ant_index = 0;
     while(1){
-        msleep(1000);
+        msleep(250);
         ant_t ant = {};
         ant.ID = ant_index++;
         if(write(graph.nodes[start].pipe[1], &ant, sizeof(ant)) == -1){
             if(errno == EPIPE){
+                printf("Entry collapsed\n");
                 break;
             }
             ERR("write");
         }
+        if(read(fd,&ant, sizeof(ant)) == -1){
+            if(errno == EAGAIN){
+                continue;
+            }
+            ERR("read");
+        }
+        printf("Ant {%d} path: ", ant.ID);
+        for(int i = 0; i<ant.path_length; i++){
+            printf("%d ", ant.path[i]);
+        }
+        printf("\n");
     }
 
+    kill(0, SIGINT);
     while(wait(NULL) > 0);
 
     close(graph.nodes[start].pipe[1]);
+
+    close(fd);
+    unlink(FIFO_NAME);
 
     exit(EXIT_SUCCESS);
 }
